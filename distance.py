@@ -48,23 +48,27 @@ def parseNodes(fname, nodes, center = None):
     center_diff = float("inf")
     # First parse lat and lon from all way nodes
     for event, element in context:    
-        try:
+        if i in nodes:
             node = nodes[i]
-        except:
-            continue
 
-        i = int(element.get("id"))
-        lat = float(element.get("lat"))
-        lon = float(element.get("lon"))
-        node.pos = (lat, lon)
+            i = int(element.get("id"))
+            lat = float(element.get("lat"))
+            lon = float(element.get("lon"))
+            node.pos = (lat, lon)
 
-        # TODO use the next way node or create nodes self
-        if center_lon is not none and center_lat is not None:
-            diff = abs(lat - center[0]) + abs(lon - center_lon[1])
-            if diff < center_diff:
-                center_diff = diff
-                center_pos = (lat, lon)
-                center_id = i
+            # TODO use the next way node or create nodes self
+            if center_lon is not none and center_lat is not None:
+                diff = abs(lat - center[0]) + abs(lon - center_lon[1])
+                if diff < center_diff:
+                    center_diff = diff
+                    center_pos = (lat, lon)
+                    center_id = i
+            
+        # Frees memory
+        # TODO look at the other clear in parseWays
+        element.clear()
+
+    del context
 
     # Secondly calculate distance for neighbors
     for node in nodes:
@@ -84,39 +88,42 @@ def parseWays(fname):
     nodes = {}
     # First just parse the ways
     for event, element in context:
-        if element.tag != "way":
-            print("error found",element.tag)
-
         for elm in element.iterchildren():
             way = []
             backward = True
+            use_way = False
             if elm.tag == "tag":
+                if elm.get("k") == "highway":
+                    use_way = True
                 if elm.get("k") == "oneway":
                     backward = False
 
                 # TODO check for different way types
-                print(elm.get("k"))
             elif elm.tag == "nd":
                 i = int(elm.get("ref"))
                 way.append(i)
+        
+        if use_way and len(way) > 1:
+            last = None
+            for i in way:
+                try:
+                    node = nodes[i]
+                except KeyError:
+                    node = WayNode(i)
+                    nodes[i] = node
 
-        if len(way) <= 1:
-            continue
+                if last is not None:
+                    last.add(WayNodeNeighbor(node))
+                if backward:
+                    node.add(WayNodeNeighbor(last))
+                last = node
+        
+        # Free memory
+        # TODO it says u can even free more here
+        # http://stackoverflow.com/questions/4695826/efficient-way-to-iterate-throught-xml-elements
+        element.clear()
 
-        last = None
-        for i in way:
-            try:
-                node = nodes[i]
-            except KeyError:
-                node = WayNode(i)
-                nodes[i] = node
-
-            if last is not None:
-                last.add(WayNodeNeighbor(node))
-            if backward:
-                node.add(WayNodeNeighbor(last))
-            last = node
-
+    del context
     return nodes
 
 def shiftDeque(deque):
