@@ -100,13 +100,7 @@ def parseWays(fname):
                 i = int(elm.get("ref"))
                 way.append(i)
 
-        if len(way) == 1:
-            # TODO does this happen
-            nodes.append(WayNode())
-            print("nearly empty way")
-        elif len(way) == 0:
-            # TODO is this an error
-            print("empty way")
+        if len(way) <= 1:
             continue
 
         last = None
