@@ -11,23 +11,68 @@ from collections import deque
 from PIL import Image, ImageDraw
 from geopy.distance import vincenty
 from lxml import etree
-
+from xml.etree import cElementTree
 
 class WayNode:
-    def __init__(self, id, neighbors = None):
+    def __init__(self, id, neighbors = None, dist = None):
         self.id = id
-        self.neighbors = neighbors
+        if neighbors is None:
+            self.neighbors = []
+        else:
+            self.neighbors = neighbors
         self.pos = None
-        self.dist = float(inf)
+        if dist is None:
+            self.dist = float("inf")
+        else:
+            self.dist = dist
 
     def add(self, node):
-        self.neighbors.append(node)
+        for neigh in self.neighbors:
+            if neigh.node.id == node.id:
+                break
+        self.neighbors.append(WayNodeNeighbor(node))
 
 class WayNodeNeighbor:
     """ This classes requires the distance to be safed twice """
     def __init__(self, node, dist = None):
         self.node = node
         self.dist = dist
+
+def exportXML(nodes, center, fname):
+    with open(fname, "w") as f:
+        f.write("<?xml version='1.0' encoding='UTF-8'?><distance>")
+        f.write("<center id='"+str(center.id)+"'></center>")
+        for i, node in nodes.items():
+            f.write("<node id='"+str(node.id)+"' dist='"+str(node.dist)+"'>")
+            for neigh in node.neighbors:
+                f.write("<neigh id='"+str(neigh.node.id)+"' dist='"+str(neigh.dist)+"'></neigh>")
+            f.write("</node>")
+        f.write("</distance>")
+
+def importXML(fname):
+    context = cElementTree.iterparse(fname, events=("end",))
+    nodes = {}
+    center = None
+    neighbors = None
+    for event, element in context:
+        if event == "start" and element.tag == "node":
+            neighbors = []
+            i = int(element.get("id"))
+            dist = float(element.get("dist"))
+        elif event == "end":
+            if element.tag == "node":
+                node = WayNode(i, neighbors, dist)
+            elif element.tag == "neigh":
+                neighbors.append(WayNodeNeighbor(int(element.get("id")), float(element.get("dist"))))
+            elif element.tag == "center":
+                center = int(element.get("id"))
+        element.clear()
+
+    for node in nodes:
+        for neigh in node.neighbors:
+            neigh.node = nodes[neigh.node]
+
+    return nodes, nodes[center]
 
 def getAttributes(element):
     for k in element:
@@ -36,94 +81,101 @@ def getAttributes(element):
 def parseOSM(fname, center = None):
     """ Parses the ways and nodes of a osm file and returns the center node"""
     nodes = parseWays(fname)
+    print("Got", len(nodes), "Nodes")
     center = parseNodes(fname, nodes, center)
     return (nodes, center)
 
 def parseNodes(fname, nodes, center = None):
     """ Adds longitude and latitude to stored nodes, and returns the centering node """
-    context = etree.iterparse(fname, events=("end",), tag="node")
+    context = cElementTree.iterparse(fname, events=("end",))
 
     center_pos = 0
     center_id = None
     center_diff = float("inf")
     # First parse lat and lon from all way nodes
     for event, element in context:    
-        if i in nodes:
-            node = nodes[i]
-
+        if element.tag != "node":
+            pass
+        else:
             i = int(element.get("id"))
-            lat = float(element.get("lat"))
-            lon = float(element.get("lon"))
-            node.pos = (lat, lon)
+            
+            if i in nodes:
+                node = nodes[i]
 
-            # TODO use the next way node or create nodes self
-            if center_lon is not none and center_lat is not None:
-                diff = abs(lat - center[0]) + abs(lon - center_lon[1])
-                if diff < center_diff:
-                    center_diff = diff
-                    center_pos = (lat, lon)
-                    center_id = i
+                lat = float(element.get("lat"))
+                lon = float(element.get("lon"))
+                node.pos = (lat, lon)
+
+                # TODO use the next way node or create nodes self
+                if center is not None:
+                    diff = abs(lat - center[0]) + abs(lon - center[1])
+                    if diff < center_diff:
+                        center_diff = diff
+                        center_pos = (lat, lon)
+                        center_id = i
             
         # Frees memory
         # TODO look at the other clear in parseWays
         element.clear()
 
-    del context
-
     # Secondly calculate distance for neighbors
-    for node in nodes:
+    for i, node in nodes.items():
         for neigh in node.neighbors:
             neigh.dist = vincenty(node.pos, neigh.node.pos).meters 
 
-    if i is None:
-        return None
+    if center_id is None:
+        return nodes, None
     else:
-        return nodes[i]
+        return nodes[center_id]
 
 
 def parseWays(fname):
     """ Parses all ways and safes the respective nodes and their "neighbors" """
-    context = etree.iterparse(fname, events=("end",), tag="way")
+    context = cElementTree.iterparse(fname, events=("start", "end"))
 
     nodes = {}
+    way = None
+    backward = True
+    use_way = False
     # First just parse the ways
     for event, element in context:
-        for elm in element.iterchildren():
-            way = []
-            backward = True
-            use_way = False
-            if elm.tag == "tag":
-                if elm.get("k") == "highway":
+        if way is None and element.tag != "way":
+            pass
+        elif event == "start":
+            if element.tag == "way":
+                way = []
+                backward = True
+                use_way = False
+            elif element.tag == "tag":
+                if element.get("k") == "highway":
                     use_way = True
-                if elm.get("k") == "oneway":
+                if element.get("k") == "oneway":
                     backward = False
 
                 # TODO check for different way types
-            elif elm.tag == "nd":
-                i = int(elm.get("ref"))
+            elif element.tag == "nd":
+                i = int(element.get("ref"))
                 way.append(i)
-        
-        if use_way and len(way) > 1:
-            last = None
-            for i in way:
-                try:
-                    node = nodes[i]
-                except KeyError:
-                    node = WayNode(i)
-                    nodes[i] = node
+        elif event == "end" and element.tag == "way":
+            if use_way and len(way) > 1:
+                last = None
+                for i in way:
+                    try:
+                        node = nodes[i]
+                    except KeyError:
+                        node = WayNode(i)
+                        nodes[i] = node
 
-                if last is not None:
-                    last.add(WayNodeNeighbor(node))
-                if backward:
-                    node.add(WayNodeNeighbor(last))
-                last = node
-        
+                    if last is not None:
+                        last.add(node)
+                        if backward:
+                            node.add(last)
+                    last = node
+            way = None
         # Free memory
         # TODO it says u can even free more here
         # http://stackoverflow.com/questions/4695826/efficient-way-to-iterate-throught-xml-elements
         element.clear()
-
-    del context
     return nodes
 
 def shiftDeque(deque):
@@ -213,15 +265,15 @@ if __name__ == "__main__":
     parser.add_argument("-f", "--file", help="OSM File to be parsed")
     parser.add_argument("-o", "--output", help="File name of output, with extension")
     parser.add_argument("-F", "--format", help="The format for export")
-    parser.add_argument("-W", "--width", help="The width of the image")
-    parser.add_argument("-H", "--height", help="The height of the image")
-    parser.add_argument("--lon", help="Set the longitude of start position")
-    parser.add_argument("--lat", help="Set the latitude of start position")
-    parser.add_argument("-i", "--interpolate", help="Defines the distance after which \"new\" nodes are added")
+    parser.add_argument("-W", "--width", type=int, help="The width of the image")
+    parser.add_argument("-H", "--height", type=int, help="The height of the image")
+    parser.add_argument("--lon", type=float, help="Set the longitude of start position")
+    parser.add_argument("--lat", type=float, help="Set the latitude of start position")
+    parser.add_argument("-i", "--interpolate", type=int, help="Defines the distance after which \"new\" nodes are added")
     parser.add_argument("--export", help="Tell python to pickle the calculated nodes to a file", dest="expor")
     parser.add_argument("--import", help="Tell python to import a pickled file", dest="impor")
     args = parser.parse_args()
-
+    
     if args.impor is None:
         if args.file is None:
             print("No input file specified, use -f/--file", file=sys.stderr)
@@ -231,21 +283,20 @@ if __name__ == "__main__":
         nodes, center = parseOSM(args.file, (args.lat, args.lon))
         print("Parsed File:", args.file)
     else:
-        import pickle
-        nodes, center = pickle.load(open(args.impor, "rb"))
+        nodes, center = importXML(args.impor)
         print("Imported File:", args.impor)
 
     if center is None:
         print("No start point specified, use --lat and --lon")
         sys.exit(1)
-    
+
+    print(center)
     # Calculate dists
     floodFill(nodes, center)
 
     # if export specified first export
     if args.expor is not None:
-        import pickle
-        pickle.dump((nodes, center), open("save.p", "wb"))
+        exportXML(nodes, center, args.expor)
         print("Exported Result to:", args.expor)
 
     if args.format in ("png","jpg","gif","tiff"):
