@@ -7,6 +7,7 @@
 #
 
 import sys
+import math
 from collections import deque
 from PIL import Image, ImageDraw
 from geopy.distance import vincenty
@@ -14,13 +15,14 @@ from lxml import etree
 from xml.etree import cElementTree
 
 class WayNode:
-    def __init__(self, id, neighbors = None, dist = None):
+    def __init__(self, id, pos = None, neighbors = None, dist = None):
         self.id = id
+        self.pos = pos
+        self.in_deque = False
         if neighbors is None:
             self.neighbors = []
         else:
             self.neighbors = neighbors
-        self.pos = None
         if dist is None:
             self.dist = float("inf")
         else:
@@ -43,32 +45,38 @@ def exportXML(nodes, center, fname):
         f.write("<?xml version='1.0' encoding='UTF-8'?><distance>")
         f.write("<center id='"+str(center.id)+"'></center>")
         for i, node in nodes.items():
-            f.write("<node id='"+str(node.id)+"' dist='"+str(node.dist)+"'>")
+            f.write("<node id='"+str(node.id)+"' dist='"+str(node.dist)+"' lat='"+str(node.pos[0])+"' lon='"+str(node.pos[1])+"'>")
             for neigh in node.neighbors:
                 f.write("<neigh id='"+str(neigh.node.id)+"' dist='"+str(neigh.dist)+"'></neigh>")
             f.write("</node>")
         f.write("</distance>")
 
 def importXML(fname):
-    context = cElementTree.iterparse(fname, events=("end",))
+    context = cElementTree.iterparse(fname, events=("end","start"))
     nodes = {}
     center = None
     neighbors = None
     for event, element in context:
-        if event == "start" and element.tag == "node":
-            neighbors = []
-            i = int(element.get("id"))
-            dist = float(element.get("dist"))
-        elif event == "end":
-            if element.tag == "node":
-                node = WayNode(i, neighbors, dist)
-            elif element.tag == "neigh":
+        if event == "start":
+            if element.tag == "neigh":
                 neighbors.append(WayNodeNeighbor(int(element.get("id")), float(element.get("dist"))))
             elif element.tag == "center":
-                center = int(element.get("id"))
+                try:
+                    center = int(element.get("id"))
+                except:
+                    print("Center without id")
+            elif element.tag == "node":
+                neighbors = []
+                i = int(element.get("id"))
+                dist = float(element.get("dist"))
+                pos = (float(element.get("lat")), float(element.get("lon")))
+        elif event == "end" and element.tag == "node":
+            if element.tag == "node":
+                node = WayNode(i, pos, neighbors, dist)
+                nodes[i] = node
         element.clear()
 
-    for node in nodes:
+    for i, node in nodes.items():
         for neigh in node.neighbors:
             neigh.node = nodes[neigh.node]
 
@@ -81,7 +89,6 @@ def getAttributes(element):
 def parseOSM(fname, center = None):
     """ Parses the ways and nodes of a osm file and returns the center node"""
     nodes = parseWays(fname)
-    print("Got", len(nodes), "Nodes")
     center = parseNodes(fname, nodes, center)
     return (nodes, center)
 
@@ -178,12 +185,12 @@ def parseWays(fname):
         element.clear()
     return nodes
 
-def shiftDeque(deque):
+def shiftDeque(d):
     """ always returns the first element of deque """
     while True:
         try:
-            yield deque.popLeft()
-        except:
+            yield d.popleft()
+        except IndexError:
             break
     
 def floodFill(nodes, start):
@@ -193,12 +200,15 @@ def floodFill(nodes, start):
     queue.append(start)
 
     for node in shiftDeque(queue):
+        node.in_deque = False
         for neigh in node.neighbors:
             dist = neigh.dist + node.dist    
             
             if neigh.node.dist > dist:
                 neigh.node.dist = dist
-                queue.append(neigh.node)
+                if not neigh.node.in_deque:
+                    queue.append(neigh.node)
+                    neigh.node.in_deque = True
 
 def getBounds(nodes):
     # TODO does this work on opposite side of earth
@@ -208,7 +218,7 @@ def getBounds(nodes):
     maxlat = float("-inf")
     maxlon = float("-inf")
 
-    for node in nodes:
+    for i, node in nodes.items():
         if minlat > node.pos[0]:
             minlat = node.pos[0]
         if maxlat < node.pos[0]:
@@ -223,17 +233,20 @@ def getBounds(nodes):
 def project(pos, minlat, maxlon, width, height, scale):
     x = width - (maxlon - pos[1]) * 10000 * scale
     y = height + (projectF(minlat) - projectF(pos[0])) * 180/math.pi * 10000 * scale
-    return (x,y)
+    return (int(x),int(y))
+
+def sec(lat):
+    return 1/math.cos(lat)
 
 def projectF(lat):
     l = lat/180*math.pi
-    return math.log(math.tan(lat) + math.sec(lat))
+    return math.log(math.tan(l) + sec(l))
 
 def drawGraph(nodes, mi, ma, width = 1000, height = None):
     if width is not None:
         # TODO why 10000
         scale = width / (ma[1] - mi[1]) / 10000
-        height = (projectF(ma[0]) - ProjectF(mi[0])) * 180 / math.pi * 10000 * scale
+        height = (projectF(ma[0]) - projectF(mi[0])) * 180 / math.pi * 10000 * scale
     elif height is not None:
         # TODO what to do here
         print("Not yet implemented", file=sys.stderr)
@@ -242,15 +255,16 @@ def drawGraph(nodes, mi, ma, width = 1000, height = None):
         print("No size given")
         sys.exit(2)
     
-    image = Image.new("RGBA", size, (255,255,255,0))
+    image = Image.new("RGBA", (int(width), int(height)), (255,255,255,0))
     draw = ImageDraw.Draw(image)
-    max_dist = max(nodes, lambda node: node.dist if node.dist != float("inf") else 0.)
+    max_dist = max(nodes.items(), key=lambda node: node[1].dist if node[1].dist != float("inf") else 0.)
+    max_dist = max_dist[1].dist
     cfac = 255/max_dist
 
-    for node in nodes:
+    for i, node in nodes.items():
         pos = project(node.pos, mi[0], ma[1], width, height, scale)
         if node.dist != float("inf"):
-            color = node.dist * cfac
+            color = int(node.dist * cfac)
             draw.point(pos, (0, color, 0, 255))
         else:
             draw.point(pos, (255,0,0,255))
@@ -290,7 +304,6 @@ if __name__ == "__main__":
         print("No start point specified, use --lat and --lon")
         sys.exit(1)
 
-    print(center)
     # Calculate dists
     floodFill(nodes, center)
 
@@ -298,12 +311,12 @@ if __name__ == "__main__":
     if args.expor is not None:
         exportXML(nodes, center, args.expor)
         print("Exported Result to:", args.expor)
-
+    
     if args.format in ("png","jpg","gif","tiff"):
         mi, ma = getBounds(nodes)
         image = drawGraph(nodes, mi, ma, args.width, args.height)
-        with open(args.output, "w") as f:
-            image.save(sys.stdout, args.format)
+        with open(args.output, "wb") as f:
+            image.save(f, args.format)
         print("Drawed Image", args.output)
 
     else:
