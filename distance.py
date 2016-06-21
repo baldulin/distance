@@ -6,6 +6,8 @@
 #
 #
 
+# TODO move all the includes like scipy
+# GEOpy or sth that are not needed to their respective functions
 import sys
 import math
 from collections import deque
@@ -13,6 +15,9 @@ from PIL import Image, ImageDraw
 from geopy.distance import vincenty
 from lxml import etree
 from xml.etree import cElementTree
+import matplotlib.pyplot as plt
+from scipy.interpolate import griddata
+import numpy as np
 
 class WayNode:
     def __init__(self, id, pos = None, neighbors = None, dist = None):
@@ -42,13 +47,13 @@ class WayNodeNeighbor:
 
 def exportXML(nodes, center, fname):
     with open(fname, "w") as f:
-        f.write("<?xml version='1.0' encoding='UTF-8'?><distance>")
-        f.write("<center id='"+str(center.id)+"'></center>")
+        f.write("<?xml version='1.0' encoding='UTF-8'?>\n<distance>")
+        f.write("<center id='"+str(center.id)+"'></center>\n")
         for i, node in nodes.items():
-            f.write("<node id='"+str(node.id)+"' dist='"+str(node.dist)+"' lat='"+str(node.pos[0])+"' lon='"+str(node.pos[1])+"'>")
+            f.write("<node id='"+str(node.id)+"' dist='"+str(node.dist)+"' lat='"+str(node.pos[0])+"' lon='"+str(node.pos[1])+"'>\n")
             for neigh in node.neighbors:
-                f.write("<neigh id='"+str(neigh.node.id)+"' dist='"+str(neigh.dist)+"'></neigh>")
-            f.write("</node>")
+                f.write("<neigh id='"+str(neigh.node.id)+"' dist='"+str(neigh.dist)+"'></neigh>\n")
+            f.write("</node>\n")
         f.write("</distance>")
 
 def importXML(fname):
@@ -86,19 +91,26 @@ def getAttributes(element):
     for k in element:
         yield element.get(k)
 
-def parseOSM(fname, center = None):
+def parseOSM(fname, center = None, waychecker = None):
     """ Parses the ways and nodes of a osm file and returns the center node"""
-    nodes = parseWays(fname)
+    nodes = parseWays(fname, waychecker)
     center = parseNodes(fname, nodes, center)
     return (nodes, center)
+
+def findNearest(nodes, pos):
+    node_id = None
+    node_diff = float("inf")
+
+    for k, node in nodes.items():
+        diff = abs(node.pos[0] - center[0]) + abs(node.pos[1] - center[1])
+        if diff < node_diff:
+            node_diff = diff
+            node_id = i
 
 def parseNodes(fname, nodes, center = None):
     """ Adds longitude and latitude to stored nodes, and returns the centering node """
     context = cElementTree.iterparse(fname, events=("end",))
 
-    center_pos = 0
-    center_id = None
-    center_diff = float("inf")
     # First parse lat and lon from all way nodes
     for event, element in context:    
         if element.tag != "node":
@@ -112,15 +124,6 @@ def parseNodes(fname, nodes, center = None):
                 lat = float(element.get("lat"))
                 lon = float(element.get("lon"))
                 node.pos = (lat, lon)
-
-                # TODO use the next way node or create nodes self
-                if center is not None:
-                    diff = abs(lat - center[0]) + abs(lon - center[1])
-                    if diff < center_diff:
-                        center_diff = diff
-                        center_pos = (lat, lon)
-                        center_id = i
-            
         # Frees memory
         # TODO look at the other clear in parseWays
         element.clear()
@@ -136,7 +139,7 @@ def parseNodes(fname, nodes, center = None):
         return nodes[center_id]
 
 
-def parseWays(fname):
+def parseWays(fname, waychecker):
     """ Parses all ways and safes the respective nodes and their "neighbors" """
     context = cElementTree.iterparse(fname, events=("start", "end"))
 
@@ -154,12 +157,10 @@ def parseWays(fname):
                 backward = True
                 use_way = False
             elif element.tag == "tag":
-                if element.get("k") == "highway":
+                if waychecker.check(element.get("k"), element.get("v")):
                     use_way = True
-                if element.get("k") == "oneway":
+                elif element.get("k") == "oneway":
                     backward = False
-
-                # TODO check for different way types
             elif element.tag == "nd":
                 i = int(element.get("ref"))
                 way.append(i)
@@ -184,20 +185,17 @@ def parseWays(fname):
         # http://stackoverflow.com/questions/4695826/efficient-way-to-iterate-throught-xml-elements
         element.clear()
     return nodes
-
-def shiftDeque(d):
-    """ always returns the first element of deque """
-    while True:
-        try:
-            yield d.popleft()
-        except IndexError:
-            break
     
-def floodFill(nodes, start):
+def floodFill(nodes, start = None):
     """ Calculates all the distances to all nodes by using the neighbours """
     queue = deque()
-    start.dist = 0.
-    queue.append(start)
+    if start is not None:
+        start.dist = 0.
+        queue.append(start)
+
+    for i, node in nodes.items():
+        if node.dist == 0.:
+            queue.append(node)
 
     for node in shiftDeque(queue):
         node.in_deque = False
@@ -242,6 +240,39 @@ def projectF(lat):
     l = lat/180*math.pi
     return math.log(math.tan(l) + sec(l))
 
+def drawContours(nodes, mi, ma, width = 1000, height = None):
+    x = []
+    y = []
+    y2 = []
+    z = []
+    for i, item in enumerate(nodes.items()):
+        k, node = item
+        if node.dist == float("inf"):
+            continue
+
+        x.append((node.pos[0], node.pos[1]))
+        y.append(node.pos[0])
+        y2.append(node.pos[1])
+        if type(node.dist) != type(float("inf")):
+            print(node.dist)
+        z.append(node.dist)
+
+    xi, yi = np.mgrid[mi[0]:ma[0]:100j, mi[1]:ma[1]:200j]
+    z = np.array(z)
+    x = np.array(x)
+    max_dist = max(nodes.items(), key=lambda node: node[1].dist if node[1].dist != float("inf") else 0.)
+    max_dist = max_dist[1].dist
+    zi = griddata(x, z, (xi, yi), method="linear")
+    CS = plt.contour(xi, yi, zi, 15, linewidths=0.5, colors='k')
+    CS = plt.contourf(xi, yi, zi, 15, cmap=plt.cm.rainbow,
+            vmax=max_dist, vmin=0)
+    #plt.plot(y,y2, 'k.', ms=1)
+    plt.colorbar()  # draw colorbar
+    # plot data points.
+    plt.xlim(mi[0], ma[0])
+    plt.ylim(mi[1], ma[1])
+    plt.savefig('foo.png')
+
 def drawGraph(nodes, mi, ma, width = 1000, height = None):
     if width is not None:
         # TODO why 10000
@@ -272,6 +303,55 @@ def drawGraph(nodes, mi, ma, width = 1000, height = None):
     del draw
     return image
 
+def drawMapnik():
+    pass
+
+class CheckWay:
+    def __init__(self):
+        self.selector = dict()
+
+    def check(self, k, v):
+        try:
+            s = self.selector[k]
+            return v in s
+        except IndexError:
+            return False
+
+    def setKey(self, key, value):
+        if key not in self.selector:
+            self.selector[key] = set()
+        self.selector[key].append(value)
+
+    def setCar(self):
+        highway = ["motorway", "trunk", "primary", "secondary", "tertiary", 
+            "unclassified", "residential", "service", "motorway_link",
+            "trunk_link", "primary_link", "secondary_link", "tertiary_link", "road"]
+        for h in highway:
+            self.setKey("highway", h)
+
+    def setPedestrian(self):
+        pedestrian = ["pedestrian", "living_street", "footway", "steps", "path"]
+        sidewalk = ["left", "right", "both", "no"]
+        for p in pedestrian:
+            self.setKey("pedestrian", p)
+
+        for s in sidewalk:
+            self.setKey("sidewalk", s)
+
+    def setBicycle(self):
+        self.highway.append("cycleway")
+        cycleway = ["lane", "opposite", "opposite_lane", "track" "opposite_track", "share_busway", "shared_lane"]
+        for c in cycleway:
+            self.setKey("cycleway", c)
+        
+def shiftDeque(d):
+    """ always returns the first element of deque """
+    while True:
+        try:
+            yield d.popleft()
+        except IndexError:
+            break
+
 if __name__ == "__main__":
     import argparse
 
@@ -285,7 +365,14 @@ if __name__ == "__main__":
     parser.add_argument("--lat", type=float, help="Set the latitude of start position")
     parser.add_argument("-i", "--interpolate", type=int, help="Defines the distance after which \"new\" nodes are added")
     parser.add_argument("--export", help="Tell python to pickle the calculated nodes to a file", dest="expor")
-    parser.add_argument("--import", help="Tell python to import a pickled file", dest="impor")
+    parser.add_argument("--import", action='append', help="Tell python to import a pickled file", dest="impor")
+    parser.add_argument("--import-with-nearest", help="If more import files are used each node is interpolated")
+    parser.add_argument("--pedestrian", action='store_const', const=True, help="Select pedestrian road")
+    parser.add_argument("--car", action='store_const', const=True, help="Select motorways")
+    parser.add_argument("--bicycle", action='store_const', const=True, help="Select roads for bicycle use")
+    parser.add_argument("--add-selector", action="append", help="Add a key/value pair, for selecting the ways")
+    parser.add_argument("--add-score", action="append", help="Adds a score to a certain key/value pair")
+    parser.add_argument("--unit", help="Uses this unit instead of meters")
     args = parser.parse_args()
     
     if args.impor is None:
@@ -293,19 +380,38 @@ if __name__ == "__main__":
             print("No input file specified, use -f/--file", file=sys.stderr)
             sys.exit(1)
 
+        # Get waychecker
+        waychecker = WayChecker()
+        if args.pedestrian:
+            waychecker.setPedestrian()
+        if args.car:
+            waychecker.setCar()
+        if args.bicycle:
+            waychecker.setBicycle()
+
+        for l in args.add_selector:
+            try:
+                k, v = l.split(" ")
+                waychecker.setKey(k, v)
+            except ValueError:
+                pass
+
         # First parse file
-        nodes, center = parseOSM(args.file, (args.lat, args.lon))
+        nodes, center = parseOSM(args.file, (args.lat, args.lon), waychecker)
         print("Parsed File:", args.file)
     else:
-        nodes, center = importXML(args.impor)
-        print("Imported File:", args.impor)
+        nodes = {} 
+        center = None
+        for fname in args.impor:
+            n, center = importXML(fname)
+            nodes.update(n)
 
-    if center is None:
-        print("No start point specified, use --lat and --lon")
-        sys.exit(1)
+            if center is not None:
+                center = center
+            print("Imported File:", fname)
 
     # Calculate dists
-    floodFill(nodes, center)
+    #floodFill(nodes, center)
 
     # if export specified first export
     if args.expor is not None:
@@ -314,6 +420,7 @@ if __name__ == "__main__":
     
     if args.format in ("png","jpg","gif","tiff"):
         mi, ma = getBounds(nodes)
+        drawContours(nodes, mi, ma, args.width, args.height)
         image = drawGraph(nodes, mi, ma, args.width, args.height)
         with open(args.output, "wb") as f:
             image.save(f, args.format)
