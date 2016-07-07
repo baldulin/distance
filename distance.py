@@ -56,11 +56,15 @@ def exportXML(nodes, center, fname):
             f.write("</node>\n")
         f.write("</distance>")
 
-def importXML(fname):
+def importXML(fname, nodes = None, find_nearest = False):
     context = cElementTree.iterparse(fname, events=("end","start"))
-    nodes = {}
+
+    if nodes is None:
+        nodes = {}
+
     center = None
     neighbors = None
+    new_nodes = {}
     for event, element in context:
         if event == "start":
             if element.tag == "neigh":
@@ -78,10 +82,10 @@ def importXML(fname):
         elif event == "end" and element.tag == "node":
             if element.tag == "node":
                 node = WayNode(i, pos, neighbors, dist)
-                nodes[i] = node
+                new_nodes[i] = node
         element.clear()
 
-    for i, node in nodes.items():
+    for i, node in new_nodes.items():
         for neigh in node.neighbors:
             neigh.node = nodes[neigh.node]
 
